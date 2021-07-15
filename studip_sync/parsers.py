@@ -1,8 +1,9 @@
-import re
-import urllib
-from bs4 import BeautifulSoup
 import cgi
 import json
+import re
+import urllib.parse
+
+from bs4 import BeautifulSoup
 
 
 class ParserError(Exception):
@@ -10,13 +11,13 @@ class ParserError(Exception):
 
 
 def extract_files_flat_last_edit(html):
-    def extract_json(soup):
-        form = soup.find('form', id="files_table_form")
+    def extract_json(s):
+        form = s.find('form', id="files_table_form")
 
         if not form:
             raise ParserError("last_edit: files_table_form not found")
 
-        if not "data-files" in form.attrs:
+        if "data-files" not in form.attrs:
             raise ParserError("last_edit: Missing data-files attribute in form")
 
         form_data_files = json.loads(form.attrs["data-files"])
@@ -24,7 +25,7 @@ def extract_files_flat_last_edit(html):
         file_timestamps = []
 
         for file_data in form_data_files:
-            if not "chdate" in file_data:
+            if "chdate" not in file_data:
                 raise ParserError("last_edit: No chdate: " + str(file_data.keys()))
 
             file_timestamps.append(file_data["chdate"])
@@ -34,8 +35,8 @@ def extract_files_flat_last_edit(html):
         else:
             return 0
 
-    def extract_html_table(soup):
-        for form in soup.find_all('form'):
+    def extract_html_table(s):
+        for form in s.find_all('form'):
             if 'action' in form.attrs:
                 tds = form.find('table').find('tbody').find_all('tr')[0].find_all('td')
                 if len(tds) == 8:
@@ -77,10 +78,10 @@ def extract_files_index_data(html):
 
     form = soup.find('form', id="files_table_form")
 
-    if not "data-files" in form.attrs:
+    if "data-files" not in form.attrs:
         raise ParserError("index_data: Missing data-files attribute in form")
 
-    if not "data-folders" in form.attrs:
+    if "data-folders" not in form.attrs:
         raise ParserError("index_data: Missing data-folders attribute in form")
 
     form_data_files = json.loads(form["data-files"])
@@ -119,9 +120,11 @@ def extract_courses(html, only_recent_semester):
         if only_recent_semester and i > 0:
             continue
 
+        j = len(tables) - i
+
         table = tables[i]
 
-        caption = table.find("caption").string.strip()
+        semester = table.find("caption").string.strip()
 
         matcher = re.compile(
             r"https://.*seminar_main.php\?auswahl=[0-9a-f]*$")
@@ -138,7 +141,8 @@ def extract_courses(html, only_recent_semester):
             yield {
                 "course_id": course_id,
                 "save_as": save_as,
-                "semester": caption
+                "semester": semester,
+                "semester_id": j
             }
 
 
@@ -148,32 +152,37 @@ def extract_media_list(html):
     media_files = []
 
     for table in soup.find_all("table", class_="media-table"):
-        if not "id" in table.attrs:
+        if "id" not in table.attrs:
             raise ParserError("media_list: 'id' is missing from table")
 
         media_hash = table["id"]
 
-        a_element = table.select_one("div.overlay-curtain > a")
+        a_element_overlay_curtain = table.select_one("div.overlay-curtain > a")
+        a_element_media_table_infos = table.select_one("div.media-table-infos > div > a")
 
-        if not a_element:
-            raise ParserError("media_list: a_element is missing")
+        if not a_element_media_table_infos:
+            raise ParserError("media_list: a_element_media_table_infos is missing")
 
-        if not "href" in a_element.attrs:
-            raise ParserError("media_list: 'href' is missing from a_element")
+        if "href" not in a_element_media_table_infos.attrs:
+            raise ParserError("media_list: 'href' is missing from a_element_media_table_infos")
 
-        media_url = a_element["href"]
+        media_url = a_element_media_table_infos["href"]
 
         if not media_hash or not media_url:
             raise ParserError("media_list: hash or url is empty")
 
-        media_files.append((media_hash, media_url))
+        media_files.append({
+            "hash": media_hash,
+            "media_url": media_url,
+            "type": "direct_download" if a_element_overlay_curtain is None else "player"
+        })
 
     return media_files
 
 
 def extract_media_best_download_link(html):
-    def extract_table(html, soup):
-        download_options = soup.select("table#dllist tr td")
+    def extract_table(_, s):
+        download_options = s.select("table#dllist tr td")
 
         if not download_options or len(download_options) <= 1:
             raise ParserError("media_download_link: No download options found")
@@ -184,41 +193,40 @@ def extract_media_best_download_link(html):
 
         download_a = download_td.find("a")
 
-        if not "href" in download_a.attrs:
+        if "href" not in download_a.attrs:
             raise ParserError("media_download_link: href is missing from download_a")
 
         return download_a["href"]
 
-    def extract_iframe(html, soup):
-        iframe = soup.find("iframe", id="framed_player")
+    def extract_iframe(_, s):
+        iframe = s.find("iframe", id="framed_player")
         if not iframe:
             raise ParserError("media_download_link: No iframe found")
 
-        if not "src" in iframe.attrs:
+        if "src" not in iframe.attrs:
             raise ParserError("media_download_link: src is missing from iframe")
 
         return iframe.attrs["src"]
 
-    def extract_video(html, soup):
-        video = soup.find("video", id="mediaplayer_html5_api")
+    def extract_video(_, s):
+        video = s.find("video", id="mediaplayer_html5_api")
         if not video:
             raise ParserError("media_download_link: No video item found")
 
-        if not "src" in video.attrs:
+        if "src" not in video.attrs:
             raise ParserError("media_download_link: src is missing from video item")
 
         return video.attrs["src"]
 
-    def extract_video_regex(html, soup):
+    def extract_video_regex(h, _):
 
-        matcher = re.compile(
-            r"\/plugins.php\/mediacastplugin\/media\/check\/.+\.mp4")
-        links = matcher.findall(html)
+        matcher = re.compile(r"/plugins.php/mediacastplugin/media/check/.+\.mp4")
+        links = matcher.findall(h)
 
         if len(links) < 1:
             raise ParserError("media_download_link: links < 1")
 
-        return links[len(links)-1]
+        return links[len(links) - 1]
 
     soup = BeautifulSoup(html, 'lxml')
 
@@ -238,7 +246,7 @@ def extract_media_best_download_link(html):
 
 
 def extract_filename_from_headers(headers):
-    if not "Content-Disposition" in headers:
+    if "Content-Disposition" not in headers:
         raise ParserError(
             "media_filename_headers: \"Content-Disposition\" is missing")
 
@@ -246,7 +254,7 @@ def extract_filename_from_headers(headers):
 
     header_value, header_params = cgi.parse_header(content_disposition)
 
-    if not "filename" in header_params:
+    if "filename" not in header_params:
         raise ParserError("media_filename_headers: \"filename\" is missing")
 
     if header_params["filename"] == "":

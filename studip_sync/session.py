@@ -7,20 +7,25 @@ import requests
 
 from studip_sync import parsers
 from studip_sync.constants import URL_BASEURL_DEFAULT, AUTHENTICATION_TYPES
+from studip_sync.parsers import ParserError
 from studip_sync.plugins.plugin_list import PluginList
 
 
 class SessionError(Exception):
     pass
 
+
 class FileError(Exception):
     pass
+
 
 class MissingFeatureError(Exception):
     pass
 
+
 class MissingPermissionFolderError(Exception):
     pass
+
 
 class DownloadError(SessionError):
     pass
@@ -105,7 +110,8 @@ class Session(object):
         if last_edit == 0:
             print("\tLast file edit couldn't be detected!")
         else:
-            print("\tLast file edit: {}".format(time.strftime("%d.%m.%Y %H:%M", time.gmtime(last_edit))))
+            print("\tLast file edit: {}".format(
+                time.strftime("%d.%m.%Y %H:%M", time.gmtime(last_edit))))
         return last_edit == 0 or last_edit > last_sync
 
     def download(self, course_id, workdir, sync_only=None):
@@ -154,7 +160,8 @@ class Session(object):
                 if response.status_code == 403 and "Documents" in response.text:
                     raise MissingFeatureError("This course has no files")
                 elif response.status_code == 403 and "Zugriff verweigert" in response.text:
-                    raise MissingPermissionFolderError("You are missing the required pemissions to view this folder")
+                    raise MissingPermissionFolderError(
+                        "You are missing the required pemissions to view this folder")
                 else:
                     raise DownloadError("Cannot access course files/files_index page")
             return parsers.extract_files_index_data(response.text)
@@ -180,17 +187,22 @@ class Session(object):
         print("\tFound {} media files".format(len(media_files)))
 
         for media_file in media_files:
-            media_hash = media_file[0]
-            media_player_url_relative = media_file[1]
-            media_player_url = requests.compat.urljoin(mediacast_list_url, media_player_url_relative)
+            media_hash = media_file["hash"]
+            media_type = media_file["type"]
+            media_player_url_relative = media_file["media_url"]
+            media_player_url = urllib.parse.urljoin(mediacast_list_url,
+                                                       media_player_url_relative)
 
-            # files are saved as "{filename}-{hash}.{file extension}"
+            # files are saved as "{filename}-{hash}.{extension}"
+            # older version might have used the format "{hash}-{filename}.{extension}"
 
             found_existing_file = False
 
             for workdir_filename in workdir_files:
                 workdir_filename_split = workdir_filename.split("-")
-                if len(workdir_filename_split) > 0 and ( workdir_filename_split[-1].split(".")[0] == media_hash or workdir_filename_split[0] == media_hash):
+
+                if workdir_filename_split[0] == media_hash or \
+                        workdir_filename_split[-1].split(".")[0] == media_hash:
                     found_existing_file = True
                     break
 
@@ -200,36 +212,39 @@ class Session(object):
 
             print("\t\tDownloading " + media_hash)
 
-            with self.session.get(media_player_url) as response:
-                if not response.ok:
-                    raise DownloadError("Cannot access media file page: " + media_hash)
+            if media_type == "player":
+                with self.session.get(media_player_url) as response:
+                    if not response.ok:
+                        raise DownloadError("Cannot access media file page: " + media_hash)
 
-                download_media_url_relative = parsers.extract_media_best_download_link(response.text)
+                    download_media_url_relative = parsers.extract_media_best_download_link(
+                        response.text)
 
-                download_media_url = requests.compat.urljoin(media_player_url, download_media_url_relative)
-
+                    download_media_url = urllib.parse.urljoin(media_player_url,
+                                                                 download_media_url_relative)
+            elif media_type == "direct_download":
+                download_media_url = media_player_url
+            else:
+                raise ParserError("media_type is not a valid type")
 
             with self.session.get(download_media_url, stream=True) as response:
                 if not response.ok:
                     print("\t\tCannot download media file: " + str(response))
                     continue
 
-                media_full_filename = parsers.extract_filename_from_headers(response.headers).split(".")
+                media_filename = parsers.extract_filename_from_headers(response.headers)
 
-                media_file_extension = media_full_filename.pop(-1)
+                media_filename_split = media_filename.split(".")
+                media_filename_extension = media_filename_split.pop()
+                media_filename_name = ".".join(media_filename_split)
 
-                # reintroduce missing '.' in the middle of the filename
-                for part in media_full_filename[:-1] :
-                    part = part + "."
-
-                media_filename = "".join(media_full_filename)
-
-                filename = media_filename + "-" + media_hash + "." + media_file_extension
+                filename = media_filename_name + "-" + media_hash + "." + media_filename_extension
 
                 filepath = os.path.join(media_workdir, filename)
 
                 if os.path.exists(filepath):
-                    raise FileError("Cannot access filepath since file already exists: " + filepath)
+                    raise FileError(
+                        "Cannot access filepath since file already exists: " + filepath)
 
                 try:
                     with open(filepath, "wb") as download_file:
@@ -238,4 +253,5 @@ class Session(object):
                     os.remove(filepath)
                     raise e
 
-                self.plugins.hook("hook_media_download_successful", media_filename, course_save_as)
+                self.plugins.hook("hook_media_download_successful", media_filename, course_save_as,
+                                  filepath)

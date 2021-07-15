@@ -111,7 +111,8 @@ class Config(JSONConfig):
         if self._password:
             return self._password
 
-        self._password = self.user_property("password") or self._get_password_command() or getpass.getpass()
+        self._password = self.user_property(
+            "password") or self._get_password_command() or getpass.getpass()
         return self._password
 
     @property
@@ -137,7 +138,7 @@ class Config(JSONConfig):
 
     @property
     def files_destination(self):
-        if not self.args.destination == None:
+        if self.args.destination is not None:
             files_destination = self.args.destination
         else:
             if not self.config:
@@ -149,7 +150,7 @@ class Config(JSONConfig):
 
     @property
     def media_destination(self):
-        if not self.args.media == None:
+        if self.args.media is not None:
             media_destination = self.args.media
         else:
             if not self.config:
@@ -158,6 +159,13 @@ class Config(JSONConfig):
             media_destination = self.config.get("media_destination", "")
 
         return os.path.expanduser(media_destination)
+
+    @property
+    def use_new_file_structure(self):
+        if not self.config:
+            return False
+
+        return self.config.get("use_new_file_structure", False)
 
 
 try:

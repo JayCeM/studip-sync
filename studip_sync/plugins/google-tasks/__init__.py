@@ -1,6 +1,8 @@
 __all__ = ['Plugin']
 
 import os.path
+import subprocess
+from datetime import timedelta
 
 from studip_sync.helpers import JSONConfig, ConfigError
 from studip_sync.plugins import PluginBase
@@ -11,17 +13,21 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
 SCOPES = ['https://www.googleapis.com/auth/tasks']
+DISPLAY_VIDEO_LENGTH_ALLOWED_FILETYPES = ['mp4']
 
-class CredsError(PermissionError):
+
+class CredentialsError(PermissionError):
     pass
 
-def isiterable(obj):
+
+def is_iterable(obj):
     try:
         iter(obj)
     except TypeError:
         return False
     else:
         return True
+
 
 class PluginConfig(JSONConfig):
 
@@ -32,7 +38,7 @@ class PluginConfig(JSONConfig):
 
         ignore_filetype = self.config.get("ignore_filetype", [])
 
-        if not isiterable(ignore_filetype):
+        if not is_iterable(ignore_filetype):
             raise ConfigError("ignore_filetype is not iterable")
 
         return ignore_filetype
@@ -44,11 +50,28 @@ class PluginConfig(JSONConfig):
 
         return self.config.get("task_list_id")
 
+    @property
+    def display_video_length(self):
+        if not self.config:
+            return False
+
+        return self.config.get("display_video_length", False)
+
     def _check(self):
 
         # access ignore_filetype once to check if valid property
         if self.ignore_filetype:
             pass
+
+
+def get_video_length_of_file(filename):
+    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                             "format=duration", "-of",
+                             "default=noprint_wrappers=1:nokey=1", filename],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+    return float(result.stdout)
+
 
 class Plugin(PluginBase):
 
@@ -56,34 +79,35 @@ class Plugin(PluginBase):
         super(Plugin, self).__init__("google-tasks", config_path, PluginConfig)
         self.token_pickle_path = os.path.join(self.config_dir, "token.pickle")
         self.credentials_path = os.path.join(self.config_dir, "credentials.json")
+        self.service = None
 
     def hook_configure(self):
         super(Plugin, self).hook_configure()
 
-        creds = None
+        credentials = None
         # The file token.pickle stores the user's access and refresh tokens, and is
         # created automatically when the authorization flow completes for the first
         # time.
 
         if os.path.exists(self.token_pickle_path):
             with open(self.token_pickle_path, 'rb') as token:
-                creds = pickle.load(token)
+                credentials = pickle.load(token)
         # If there are no (valid) credentials available, let the user log in.
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
+        if not credentials or not credentials.valid:
+            if credentials and credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
             else:
                 if not os.path.exists(self.credentials_path):
-                    raise CredsError("Missing credentials.json at " + self.credentials_path)
+                    raise CredentialsError("Missing credentials.json at " + self.credentials_path)
 
                 flow = InstalledAppFlow.from_client_secrets_file(
                     self.credentials_path, SCOPES)
-                creds = flow.run_local_server(port=0)
+                credentials = flow.run_local_server(port=0)
             # Save the credentials for the next run
             with open(self.token_pickle_path, 'wb') as token:
-                pickle.dump(creds, token)
+                pickle.dump(credentials, token)
 
-        service = build('tasks', 'v1', credentials=creds)
+        service = build('tasks', 'v1', credentials=credentials)
 
         # Call the Tasks API
         results = service.tasklists().list(maxResults=10).execute()
@@ -110,29 +134,37 @@ class Plugin(PluginBase):
     def hook_start(self):
         super(Plugin, self).hook_start()
 
-        creds = None
+        credentials = None
 
         if os.path.exists(self.token_pickle_path):
             with open(self.token_pickle_path, 'rb') as token:
-                creds = pickle.load(token)
+                credentials = pickle.load(token)
 
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
+        if not credentials or not credentials.valid:
+            if credentials and credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
             else:
-                raise CredsError("tasks: couldn't log in")
+                raise CredentialsError("tasks: couldn't log in")
 
-        self.service = build('tasks', 'v1', credentials=creds)
+        self.service = build('tasks', 'v1', credentials=credentials)
 
-    def hook_media_download_successful(self, filename, course_save_as):
-        if self.config and self.config.ignore_filetype:
-            file_extension = os.path.splitext(filename)[1][1:]
+    def hook_media_download_successful(self, filename, course_save_as, full_filepath):
+        file_extension = os.path.splitext(filename)[1][1:]
 
-            if file_extension in self.config.ignore_filetype:
-                self.print("Skipping task: " + filename)
-                return
+        if self.config and self.config.ignore_filetype and file_extension in self.config.ignore_filetype:
+            self.print("Skipping task: " + filename)
+            return
 
-        return self.insert_new_task(filename, course_save_as)
+        description = course_save_as
+
+        if self.config and self.config.display_video_length and file_extension in DISPLAY_VIDEO_LENGTH_ALLOWED_FILETYPES:
+            video_length = get_video_length_of_file(full_filepath)
+            video_length_seconds = int(video_length)
+            video_length_str = str(timedelta(seconds=video_length_seconds))
+
+            description = "{}: {}".format(video_length_str, description)
+
+        return self.insert_new_task(filename, description)
 
     def insert_new_task(self, title, description):
         body = {
@@ -146,5 +178,3 @@ class Plugin(PluginBase):
 
         self.print("Inserting new task: " + title)
         return self.service.tasks().insert(tasklist=self.config.task_list_id, body=body).execute()
-
-
